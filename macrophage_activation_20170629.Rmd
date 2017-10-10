@@ -1,0 +1,276 @@
+---
+title: "macrophage_activation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+#0.INSTALLING AND CALLING PACKAGES
+# install.packages("data.table")
+# install.packages("cowplot")
+# install.packages("RColorBrewer")
+
+library(data.table)
+library(cowplot)
+library(RColorBrewer)
+library(boot)
+library(knitr)
+
+dev.off()
+rm(list=ls())
+
+source("/home/ramhak/Dropbox/PHD/PAPER I/R_v2/Function_directory/RTqPCR_data_output_adjuster.R")
+```
+
+```{r echo=F, warning=F, message=F, error=F}
+#1. IMPORTING DATA
+DT <- fread("macrophage_activation_data.csv")
+animal_setup <- fread("animal_setup.csv")
+
+animal_setup[,.N, by=c("study.group")]
+
+#2. Merging datasets
+DT <- merge(DT, animal_setup, by.x="Sample", by.y="RH.index")
+
+# #2. Keeping only necessary variables and rows
+DT <- DT[,!c(4,6:10)][!(Target %in% c("ActinB", "GAPDH"))]
+
+# #3. Adjusting variables to numeric
+adjust_vars <- c("Mean Cq", "Normalized Expression", "day.sacrifice", "force", "displacement")
+DT[,adjust_vars] <- suppressWarnings(DT[,lapply(.SD,numeric_adjust),.SDcols=adjust_vars])
+
+#4. Adjusting day of sacrifice
+DT[,"day.sacrifice"] <- as.character(DT[,day.sacrifice])
+DT[,"day.sacrifice"] <- do.call(rbind,lapply(as.list(DT[,day.sacrifice]),function(x){switch(x,"4"=3,"9"=10,"21"=20,"3"=3,"10"=10,"20"=20,"NA"=NA)}))
+
+#5. Defining variable types
+factor_vars <- c("Sample", "Target", "study.group")
+DT[,factor_vars] <- DT[,lapply(.SD, factor), .SDcols=factor_vars]
+
+#6. TAGGING M1 AND M2 MARKERS
+m1_markers <- c("CD16", "CD32")
+m2_markers <-  c("Arg1","CD206")
+
+DT[,phenotype:=ifelse(Target %in% m1_markers, "M1", "M2")]
+
+#7. Removing values above 35 
+DT <- DT[`Mean Cq`<=35][,!"Mean Cq"]
+
+#8. Adjusting expression for displacement 
+DT <- DT[,Expression := `Normalized Expression`/displacement][,!c("Normalized Expression", "displacement", "force")]
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+######################################### AGGREGATING & SUMMARISING DATA #########################################
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+#1. Aggregating data on cytokine/chemokine level: forming biological replicates
+DT_aggregated <- unique(DT[,.(Expression.Mean=median(Expression, na.rm=T),phenotype), by=c("Target", "day.sacrifice", "study.group")])
+
+#2. Summarising data for plotting purposes & export
+DT_summary <- DT[day.sacrifice==20,.(Expression.Mean=median(Expression, na.rm=T)), by=c("day.sacrifice", "study.group", "phenotype")]
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+#1. Calculating M1/M2 ratio for each treatment group at 20 days post SCI
+#From long to wide format
+DT_summary <- dcast(DT_summary, ...~phenotype, value.var = "Expression.Mean")
+#Calculating M1/M2 ratio  
+DT_summary <- DT_summary[,M1_M2_ratio:=M1/M2][study.group!="E"]
+
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+############################################### PLOTTING RELATIVE M1/M2 RATIO ########################################
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+colorpalette_1 <- brewer.pal(11, "RdBu")[c(1,2,10,11)]
+
+m1_m2_plot <- ggplot(DT_summary, aes(x=study.group, y=M1_M2_ratio, fill=study.group))+
+  geom_bar(stat="identity", width=0.6)+
+  geom_text(aes(label=format(round(M1_M2_ratio,2), nsmall=2)), fontface=2, vjust=-2, size=7)+
+  
+  scale_fill_manual(values=colorpalette_1, labels=c("Allogenic IDmBMSC (n=3)", "Syngeneic IDmBMSC (n=3)", "Medium Control (n=3)", "mSVF (n=3)"))+
+  scale_y_continuous(breaks=seq(0,20,2.5), limits = c(0,20))+
+  scale_x_discrete()+
+
+  theme(legend.position = "bottom", legend.title = element_blank(), legend.text=element_text(size=20), legend.justification = "center", axis.title = element_text(size=22, face="bold"), axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.line.x = element_blank(), axis.title.x = element_blank())+
+  ylab("M1/M2 ratio")
+
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+############################################# SENSITIVITY ANALYSIS    #############################################
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+#1. Subsetting data for bootstraping. Using DT in order to consider all ingoing data. 
+DT_bootstrap <- DT[day.sacrifice==20, !c("day.sacrifice")]
+
+#2. Function for generating bootstrap replicates
+m1_m2_sensitivity_function <- function(dataset, group){
+  dataset <- dataset[study.group==group]
+  m1_data <- dataset[phenotype=="M1", Expression]
+  m2_data <- dataset[phenotype=="M2", Expression]
+
+  m1_data <- mean(sample(m1_data, length(m1_data), replace = T))
+  m2_data <- mean(sample(m2_data, length(m2_data), replace = T))
+
+  m1_m2_ratio <- m1_data/m2_data
+
+  return(m1_m2_ratio)
+}
+
+# #3. Generating bootstrap replicates
+boot_data_A <- do.call(rbind, lapply(1:1000, function(run){m1_m2_sensitivity_function(DT_bootstrap, "A")}))
+boot_data_B <- do.call(rbind, lapply(1:1000, function(run){m1_m2_sensitivity_function(DT_bootstrap, "B")}))
+# 
+boot_data_plot <- data.table(boot_data_A, boot_data_B)
+names(boot_data_plot) <- c("allogenic", "syngeneic")
+boot_data_plot <- suppressWarnings(melt.data.table(boot_data_plot, variable.name = "treatment", value.name = "value"))
+
+#4. Generating summary table for plotting and export
+boot_data_summary <- boot_data_plot[,.(Median=median(value), p25=quantile(value, .25), p75=quantile(value, .75),Mean=mean(value),SD=sd(value), N=.N), by="treatment"]
+
+#5. Plotting histograms of bootstrapped M1/M2 replicates
+m1_m2_sensitivity_plot <- ggplot(boot_data_plot, aes(x=value, fill=treatment))+
+  geom_histogram(position = "identity", alpha=0.8, bins=75)+
+  geom_errorbarh(boot_data_summary, mapping=aes(xmin=p25,x=Median, xmax=p75, y=100, colour=treatment), size=2, height=5, show.legend = F)+
+  geom_point(boot_data_summary, mapping=aes(x=Median, y=100, color=treatment), size=3,shape=15, show.legend = F)+
+  
+  scale_fill_manual(values=colorpalette_1[c(1,4,2,3)], labels=c("Allogenic IDmBMSC (n=3)", "Syngeneic IDmBMSC (n=3)", "Medium Control (n=3)", "mSVF (n=3)"))+
+  scale_color_manual(values=colorpalette_1[c(1,4,2,3)], labels=c("Allogenic IDmBMSC (n=3)", "Syngeneic IDmBMSC (n=3)", "Medium Control (n=3)", "mSVF (n=3)"))+
+  scale_x_continuous(breaks=seq(0,15,1), limits=c(0,15))+
+  scale_y_continuous(breaks=seq(0,110,10), limits=c(0,110))+
+  
+  xlab("M1/M2 ratio")+
+  ylab("Count (n)")+
+  theme(axis.title = element_text(size=22, face="bold"), legend.position = "bottom", legend.justification = "center",  legend.title = element_blank(), legend.text = element_text(size=20))
+  
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+########################################## CORRELATION M1/M2 RATIO VS PRO-INFLAMMATION #################################
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+#1. Calculating M1/M2 ratio for every sample (animal)
+DT_m1m2 <- DT[, !c("Target", "study.group")]
+DT_m1m2 <- DT_m1m2[,.(Expression =mean(Expression)), by=c("Sample", "day.sacrifice", "phenotype")]
+DT_m1m2 <- dcast(DT_m1m2, ...~phenotype, value.var="Expression")
+DT_m1m2 <- DT_m1m2[,M1_M2_ratio:=M1/M2][,!c("M1", "M2")]
+
+#2. Importing dataset from "neuroinflammation, gene expression"
+DT_proinflammation <- fread("DT.csv")
+#Adjusting for pro.inflammation expression for displacement to match adj. of displ. of M1/M2 data
+DT_proinflammation <- DT_proinflammation[,Normalized.Expression.Adjust:=Normalized.Expression.Adjust/displacement]
+#Removing outliers from pro.inflammation expression data. Fold changes are not used in order to match M1/M2 data
+DT_proinflammation <- DT_proinflammation[Normalized.Expression.Adjust<0.5e-04] 
+#Subsetting data
+DT_proinflammation <- DT_proinflammation[,.(Sample, day.sacrifice, Normalized.Expression.Adjust)]
+setnames(DT_proinflammation, "Normalized.Expression.Adjust", "Pro.Inflammation")
+#Calculating mean pro.inflammation for each animal
+DT_proinflammation <- DT_proinflammation[,.(Pro.Inflammation=mean(Pro.Inflammation)), by=c("Sample", "day.sacrifice")]
+#Setting "Sample" as factor in order to allow for merge()
+DT_proinflammation[,"Sample"] <- factor(DT_proinflammation[,Sample])
+
+#3. Merging datasets on sample 
+DT_correlation <- merge(DT_m1m2, DT_proinflammation, by="Sample")
+DT_correlation <- DT_correlation[,!"day.sacrifice.y"]
+
+#4. Plotting M1/M2 ratio vs pro.inflammation
+corr_plot <- ggplot(DT_correlation, aes(x=M1_M2_ratio, y=Pro.Inflammation))+
+  geom_smooth(method="lm", color="black", linetype=2)+
+  geom_jitter(size=16, color=colorpalette_1[4], shape="*")+
+  
+  scale_x_continuous(breaks = seq(0,8,0.5))+
+  scale_y_continuous(breaks=seq(0,4e-05, 1e-06))+
+  
+  xlab("M1/M2 ratio")+
+  ylab("Pro-Inflammation")+
+  theme(axis.title = element_text(size=22, face="bold"))
+
+#5. Predictive model: prediciting pro-inflammation with M1/M2 ratio
+predicitive_model <- summary(lm(Pro.Inflammation~M1_M2_ratio, data=DT_correlation))
+
+#6. Bootstrapping p-values for correlation 
+boot_corr_function <- function(corr_data, corr_method, runs){
+  boot_corr_out <- boot(corr_data, function(corr_data, b){cor.test(corr_data[b,M1_M2_ratio], corr_data[b,Pro.Inflammation], method = corr_method)$p.value}, R=runs)
+  
+  return(boot_corr_out)
+}
+
+#Generating bootstrap replicates
+boot_corr_data_spearman <- suppressWarnings(boot_corr_function(DT_correlation, "spearman", 1000))
+boot_corr_data_kendall <- suppressWarnings(boot_corr_function(DT_correlation, "kendall", 1000))
+boot_corr_data <- data.table(boot_corr_data_spearman$t, boot_corr_data_kendall$t)
+names(boot_corr_data) <- c("spearman", "kendall")
+boot_corr_data <- suppressWarnings(melt(boot_corr_data, variable.name = "method", value.name = "p.value"))
+
+#7. Plotting boostrapped p-values for 3 different correlation methods
+boot_corr_sensitivity_plot <- ggplot(boot_corr_data, aes(x=p.value, fill=method))+
+  geom_rect(aes(xmin=-0.003,xmax=0.05, ymin=0, ymax=520),alpha=0.02, fill="grey")+
+  geom_histogram(position="identity", alpha=0.4, bins=50)+
+
+  scale_fill_manual(values=colorpalette_1[c(1,4)], labels=c("Spearman", "Kendall"))+
+  scale_x_continuous(limits = c(-0.01,0.25))+
+  scale_y_continuous(breaks=seq(0,500,50))+
+  
+  xlab("P-value")+
+  ylab("Count (n)")+
+  theme(axis.title = element_text(size=22, face="bold"), legend.position = "bottom",legend.justification = "center",  legend.title = element_blank(), legend.text = element_text(size=20))+
+  
+  annotate("text", x=0.025, y=450, label="Region of\nStatistical\nSignificance", fontface=4, size=7)
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+####################################################### OUTPUT ########################################################
+```
+
+```{r message=FALSE, error=FALSE, warning=FALSE, echo=FALSE}
+# #1. Saving realtive M1_M2 ratio base plot
+# ggsave("m1_m2_plot.jpg", m1_m2_plot, width=14, height=7, dpi=1000)
+
+# #2. Saving histograms of bootstrapped M1/M2 ratio
+# ggsave("m1_m2_sensitivity_plot.jpg",m1_m2_sensitivity_plot, width=14, height=7, dpi=1000)
+
+# #3. Exporting bootstrap summary table
+# fwrite(cbind(boot_data_summary[,1], format(round(boot_data_summary[,2:length(boot_data_summary)],2), nsmall=2)), "boot_data_summary.csv", sep=";")
+
+# #4. Saving correlation plot
+# ggsave("corr_plot.jpg", corr_plot, width=14, height=7, dpi=1000)
+
+# #5. Saving correlation sensitivity plot
+# ggsave("boot_corr_sensitivity_plot.jpg", boot_corr_sensitivity_plot, width=14, height=7, dpi=1000)
+
+# # #6. Table: Evaluation of assumptions and estimate and p-value for each correlation method
+# Assump.Norm.M1.M2 <- shapiro.test(DT_correlation[, M1_M2_ratio])$p.value
+# Assump.Norm.Pro.Infl <- shapiro.test(DT_correlation[, Pro.Inflammation])$p.value
+
+# spearman <- cor.test(DT_correlation[,M1_M2_ratio],DT_correlation[,Pro.Inflammation], method="spearman")
+# kendall <- cor.test(DT_correlation[,M1_M2_ratio],DT_correlation[,Pro.Inflammation], method="kendall")
+# 
+# corr_table_descriptive <- data.table(Norm.test=c("M1.M2", "Pro.Inflammation"),Norm.test.p=c(Assump.Norm.M1.M2,Assump.Norm.Pro.Infl),Variables=c("Estimate", "P-value"), Spearman=c(spearman$estimate, spearman$p.value), Kendall=c(kendall$estimate, kendall$p.value))
+# 
+# corr_table_descriptive <- data.table(format(corr_table_descriptive, scientific=T, digits=2))
+# 
+# fwrite(corr_table_descriptive, "corr_table_descriptive.csv", sep=";")
+
+# #7. Table: Descriptive statistics for bootstrapped p-values for each stat
+# corr_table_descriptive_boot <- boot_corr_data[method!="pearson",.(N=.N, Median=median(p.value), p25=quantile(p.value,.25), p75=quantile(p.value, .75), Mean=mean(p.value), SD=sd(p.value)), by="method"]
+# corr_table_descriptive_boot <- cbind(corr_table_descriptive_boot[,1],format(corr_table_descriptive_boot[,2:length(corr_table_descriptive_boot)], scientific=T, digits=2))
+# 
+# fwrite(corr_table_descriptive_boot, "corr_table_descriptive_boot.csv", sep = ";")
+
+# #8. Exporting essentials from predictive model 
+# predicitive_model <- data.table(predicitive_model$coefficients[,c(1,4)],Adj.R.squared=predicitive_model$r.squared)
+# predicitive_model <- data.table(format(predicitive_model, scientific=T, digits=2))
+# fwrite(predicitive_model, "predicitive_model.csv", sep=";")
+
+```
+
